@@ -1,103 +1,213 @@
-# Superfs — Product Requirements
+# Superfs — Product Requirements Document
 
-> **The filesystem humans and coding agents share.**
-
-Status: draft · Owner: superfs core · Related: [architecture](architecture.md), [mount design](mount-design.md)
+Related: [architecture](architecture.md), [mount design](mount-design.md)
 
 ## 1. Vision
 
-People and coding agents increasingly work on the same projects. They work from laptops, CI runners, cloud sandboxes, and ephemeral agent containers. Today each of those places keeps its own full copy of the project and syncs it by hand (git push/pull, rsync, zip uploads). Superfs replaces those copies with one shared, versioned drive:
+**Infinite storage for everyone — one filesystem shared by people, programs, and coding agents.**
 
-- Every machine sees the same tree, fetched lazily and cached locally.
-- Every change is a new immutable version, attributed to the human or agent who made it.
-- Agents are first-class users. They get scoped, revocable tokens, their own forks to work in, and a change feed to react to.
-- Conflicts between humans and agents are kept and surfaced, never silently overwritten.
+Superfs presents cloud-stored files as if they were local, without requiring a complete copy on any device. Humans mount it as a folder; agents reach it over CLI/API; programs (later) reach it over S3. The entire client footprint — cache, buffers, metadata, binary — never exceeds 2GB.
 
-## 2. Surfaces
+**Competitive frame:** Space ([spacefs.com](https://spacefs.com)) sells "the infinite AI-native filesystem" with mount + S3 + forks. Superfs's wedge is the agent workflow done deeply — forks, per-version attribution, conflict UX, sandbox integration — plus radical simplicity (2GB guarantee, zero-config).
 
-Superfs has three ways in, all backed by the same metadata service and object store.
+## 2. Goals
 
-| Surface | Primary user | What it is | Phase |
-|---|---|---|---|
-| **Mount** | People (and tools that expect a real path) | A normal folder via FUSE (Linux), macFUSE (macOS), WinFsp (Windows). Lazy fetch, local cache, background upload. | 2 |
-| **CLI / API** | Coding agents, scripts, CI | `superfs` CLI and HTTP API: read, write, history, restore, fork, watch. No kernel driver needed, so it works in locked-down sandboxes. | 1 |
-| **S3-compatible endpoint** | Existing programs and SDKs | Any S3 client can read and write a drive (or a fork) by bucket/key. | 4 |
+- Files appear instantly; contents stream on demand
+- Changes sync across devices and agent sandboxes
+- Full version history; any version restorable
+- Overlapping edits never silently destroy data — conflicts are preserved
+- Agents are first-class users: scoped tokens, attributed writes, constant-time forks
+- Zero-configuration UX: install, `superfs init`, done
+- Linux, macOS, Windows
 
-## 3. Users
+## 3. Non-goals (MVP)
 
-- **Developer (human):** edits files in an IDE on one or more machines and expects them to look like local files.
-- **Coding agent:** runs in a sandbox with limited permissions. It reads part of a project, makes changes, and hands results back for review.
-- **Automation / program:** CI jobs, build systems, and data tools that talk S3 or HTTP.
-- **Drive owner / admin:** controls who and what can access a drive, and can revoke access.
+- Real-time collaboration / live cursors
+- Automatic merging of conflicting edits (detection + preservation only)
+- Multi-user permissions/teams (single user, many devices + agents)
+- Offline write queueing beyond the pending-write buffer
+- Mobile clients
+- S3-compatible endpoint (phase 4)
 
 ## 4. User stories
 
-Priority: **P0** = required for first usable release; **P1** = required before general availability; **P2** = later.
-
-### Agents as first-class users
-
-| ID | Priority | Story | Acceptance criteria |
-|---|---|---|---|
-| A1 | **P0** | As a drive owner, I can mint a **scoped, revocable agent token** so an agent can access only what it needs. | `POST /tokens` returns a token with path-prefix scope(s), permissions (`read`, `write`, `fork`, `watch`), optional branch restriction, and expiry. Revocation takes effect on the next API call (≤ 5 s including cache TTL). Tokens are never able to mint broader tokens. |
-| A2 | **P0** | As a reviewer, I can see **who authored every version** (which human or which agent token), so I can audit and attribute changes. | Every row in `versions` has a non-null `author` (user id or token id + display label). `history` and the change feed expose it. Author cannot be spoofed by the client. |
-| A3 | **P1** | As an agent orchestrator, I can **fork a drive in constant time** for each agent task, so agents work in isolation and the result can be reviewed or discarded. | `POST /forks` returns in O(1) regardless of drive size (metadata only, no object copies). Reads on the fork fall through to the parent at the fork point. Writes stay on the fork. Forks can be listed, diffed against parent, merged, or deleted. |
-| A4 | **P1** | As an agent or tool, I can subscribe to a **change feed** so I react to edits instead of polling the whole tree. | `GET /files?since=T` returns all changes after cursor `T` (path, version, author, branch, op). A streaming/long-poll variant exists. The cursor is monotonic and resumable. No changes are skipped across reconnects. |
-| A5 | **P1** | As a developer, when an agent and I edit the same file, **conflicts are resolved explicitly** and neither side's work is lost. | Compare-and-swap commit detects stale `base_version`. Both versions are kept. A `conflicts` row records both sides and their authors. The mount shows a conflict copy. CLI/API expose `resolve` (pick ours/theirs/merged). Human edits are never auto-discarded in favor of agent edits. |
-| A6 | **P1** | As a drive owner, I can **share a single folder** with a person or agent using token scopes, without exposing the rest of the drive. | A token scoped to `/docs/` cannot list, read, or infer the names of paths outside `/docs/`. Sharing a folder = minting a scoped token (read-only or read-write). |
-
-### Core filesystem
-
-| ID | Priority | Story | Acceptance criteria |
-|---|---|---|---|
-| F1 | **P0** | As a developer or agent, I can read and write files through the CLI/API. | upload-url → PUT to R2 → commit, and download-url → GET. Works with files up to 5 GB (multipart). |
-| F2 | **P0** | As a user, I can view a file's **history** and **restore** any prior version. | `history` lists versions with author, size, timestamp, base version. `restore` creates a new version whose content equals the chosen one (history is append-only). |
-| F3 | **P0** | As a user, my data is not silently lost or overwritten. | Immutable version objects. CAS commits. Crash-consistent client (see [mount design](mount-design.md)). |
-| F4 | **P1** | As a developer, I can **mount** a drive as a normal folder on Linux, macOS, and Windows. | Standard editors, `git`, compilers, and `ripgrep` work on the mount. Repeated reads of cached files run at local-disk speed. |
-| F5 | **P1** | As a developer, I can keep working **offline** with cached files and have my edits sync when I reconnect. | Pending writes persist on disk across restarts. Conflicts on reconnect follow A5. |
-| F6 | **P2** | As a team, I can take **advisory locks** on files (e.g. binary assets). | `locks` table is reserved in phase 1 and its API ships in phase 4. |
-| F7 | **P2** | As a program, I can use any **S3 SDK** against a drive or fork. | ListObjectsV2, GetObject, PutObject, multipart, HeadObject against `/{drive}[@branch]/key`. |
-| F8 | **P2** | As an integrator, I can receive **notifications** (webhooks) on changes. | Built on the change feed. Filtered by path prefix and branch. |
-
-## 5. Client footprint guarantee
-
-Superfs must be safe to run on a laptop and inside small agent sandboxes.
-
-- **Hard cap: the client never uses more than 2 GB of local storage + cache memory combined for superfs data.** The cap is fixed. There is **no user-facing tuning knob.**
-- The disk cache is **on by default**.
-- The internal budget split (see [architecture §7](architecture.md#7-client-cache)) is ~1.7 GB read cache, ~250 MB pending-write buffer, ~50 MB metadata cache.
-- When the pending-write buffer is full, writers get backpressure: writes block until uploads drain. Unsynced data is never evicted.
-- The CLI/API surface in sandboxes can run with a zero-byte cache (stream-only) but still never exceeds the cap.
-
-## 6. Success metrics
-
-| Metric | Target (GA) |
-|---|---|
-| Fork creation latency (p99), any drive size | < 100 ms |
-| Cold open-to-first-byte for a 1 MB file (same region) | < 150 ms p50, < 500 ms p99 |
-| Warm (cached) read throughput on mount | ≥ 80% of native local disk |
-| Commit visible to other clients via change feed | < 2 s p95 |
-| Token revocation effective | < 5 s p99 |
-| Client local footprint | ≤ 2 GB, always (hard guarantee, monitored) |
-| Silent data loss incidents | 0 |
-| Versions with missing/incorrect author attribution | 0 |
-| Agent adoption: share of commits authored by agent tokens | tracked, no target |
-| Weekly active drives with ≥ 1 human and ≥ 1 agent author | primary growth metric |
-
-## 7. Non-goals (for now)
-
-- POSIX-perfect semantics (hard links, cross-file atomic rename across directories, mmap write-sharing between machines).
-- Real-time collaborative editing (character-level CRDT). Superfs works at file-version granularity.
-- Automatic semantic merges beyond simple, provably non-overlapping cases. These may come later.
-- Being a git replacement. Superfs is the working tree layer. Git can live on top.
-
-## 8. Roadmap
-
-| Phase | Deliverable | Key stories |
+| # | Story | Priority |
 |---|---|---|
-| **1 — CLI** | Metadata API, R2 versioned storage, `superfs` CLI, scoped tokens, author attribution, history/restore | F1, F2, F3, A1, A2 |
-| **2 — Mount** | Portable client core + FUSE/macFUSE/WinFsp shims, two-tier cache, write-path state machine, offline | F4, F5, A5, A6 |
-| **3 — Forks** | Branches table, `POST /forks`, copy-on-write reads, diff/merge, change feed | A3, A4 |
-| **3b — Tauri app** | Desktop app (Tauri) on top of the mount: sign-in, drive picker, conflict resolution UI, token management, sync status | A5, A6 (UI) |
-| **4 — Platform** | S3-compatible endpoint, webhooks/notifications, advisory locks | F6, F7, F8 |
+| 1 | Run `superfs init`, connect account in one step | P0 |
+| 2 | push/pull files, view history via CLI | P0 |
+| 3 | Stale edit → both versions preserved, user notified | P0 |
+| 4 | Disk usage never exceeds 2GB | P0 |
+| 5 | Agent sandbox authenticates with scoped, revocable token; reads/writes same files | P0 |
+| 6 | Every version shows its author — human or specific agent session | P0 |
+| 7 | Open `~/Superfs/` as a real folder; any app reads/writes it | P1 |
+| 8 | Agent forks the drive in constant time, works, human reviews or discards the fork | P1 |
+| 9 | Agent polls change feed to learn when files changed | P1 |
+| 10 | Share exactly the folders a partner needs via token scopes | P1 |
+| 11 | Manage Superfs via lightweight Tauri desktop app | P2 |
+| 12 | Any S3 client works unchanged against an S3-compatible endpoint | P3 |
 
-Order is strict: CLI → mount → forks → Tauri → S3 endpoint / notifications / locks. The Tauri app is a packaging and UX layer over the phase 2–3 client, so it is numbered 3b rather than a phase of its own.
+## 5. Product surfaces
+
+| Surface | Users | Phase |
+|---|---|---|
+| CLI (`init`/`pull`/`push`/`status`/`log`/`restore`/`fork`/`config`) | Everyone; agents natively | 1 |
+| Mount (FUSE / macFUSE / WinFsp) | Humans, any app | 2 |
+| Forks + change feed | Agents | 2–3 |
+| Tauri desktop app | Humans | 3 |
+| S3-compatible endpoint | Programs/SDKs | 4 |
+
+## 6. Functional requirements
+
+### 6.1 Storage & versioning
+
+- File contents in Cloudflare R2 as immutable objects: `<project>/<path>/v-<version>`
+- Every write = new version key; nothing overwritten
+- Any version restorable (restore copies version N forward as new current)
+
+### 6.2 Conflict model (compare-and-swap)
+
+- Every write declares `base_version`; commit succeeds iff `base_version == current_version`
+- Stale base → uploaded version still committed to history, current stays on winner, conflict record created, loser materializes `file.conflict-v<N>.ext`
+- Conflicts are a core feature, not an edge case — human-vs-agent collisions are expected
+
+### 6.3 Forks (copy-on-write branches)
+
+- `fork` = metadata-only, constant-time operation — zero bytes copied
+- Reads: latest version on my branch, else fall through to parent's fork point
+- Writes: always land on my branch
+- Enables "a fork per agent task; experiments never touch live files"
+
+### 6.4 Cache (the 2GB budget)
+
+- Two tiers: RAM buffer → disk block cache → R2
+- Block-keyed `(path, version, block_index)`, 256KB–1MB blocks — version-keying makes invalidation free
+- Internal split (invisible to user): ~1.7GB read cache / ~250MB pending writes / ~50MB metadata+binary
+- LRU eviction — always safe, everything re-fetchable
+- Setup: disk cache on by default, no size option shown; pure-streaming mode is a hidden config flag only
+
+### 6.5 Read path
+
+- `read(path, offset, len)` → RAM → disk → Range-fetch from R2 → store both tiers
+- Sequential prefetcher with adaptive lookahead (1–10 blocks based on measured throughput)
+- Read-during-upload: committed blocks of an in-progress upload are fetchable
+
+### 6.6 Write path
+
+- State machine: `DIRTY → UPLOADING → UPLOADED → COMMITTED` (or `CONFLICT`)
+- Writes buffered durably in pending-write area; upload on `close()`/`fsync`/`push`
+- Crash before `COMMITTED` → buffer replays on restart; nothing acknowledged is lost
+- File larger than write buffer → clear error (MVP); streaming upload later
+
+### 6.7 Auth
+
+- Two identity types: user sessions (interactive login) + machine tokens (scoped, expiring, revocable)
+- Token scopes: e.g. `read:*`, `write:project/docs/*` — enables folder-scoped sharing
+- Same permission checks on both; author recorded on every version
+
+### 6.8 Mount semantics (phase 2)
+
+- ~40 POSIX callbacks against the core's internal API
+- `rename` emulated (copy + metadata update + delete), must be crash-safe
+- Metadata (`stat`/`readdir`) served from pinned RAM cache — OS generates heavy metadata traffic; mark mount to skip indexers (Spotlight etc.)
+- Platform code is syscall translation only; all policy in portable core
+
+## 7. System architecture
+
+Full detail: [architecture.md](architecture.md).
+
+```mermaid
+flowchart TB
+    subgraph CLIENT["User's Machine — max 2GB total"]
+        subgraph FE["Frontends"]
+            CLI["CLI"]
+            MNT["Mount: FUSE / macFUSE / WinFsp"]
+            GUI["Tauri app"]
+        end
+        subgraph CORE["Shared Core (platform-agnostic)"]
+            SE["Sync Engine"]
+            RP["Read Path + Prefetcher"]
+            WP["Write Path"]
+            FK["Fork/Branch Logic"]
+        end
+        subgraph CA["Cache (within 2GB)"]
+            RAM["RAM buffer"]
+            DSK["Disk block cache (LRU)"]
+            PW["Pending-write buffer"]
+        end
+        FE --> CORE --> CA
+    end
+    subgraph CLOUD["Cloud"]
+        API["Metadata API"]
+        DB[("Metadata DB")]
+        R2[("R2 — immutable versioned objects")]
+        API --> DB
+    end
+    CA <-->|"metadata, presigned URLs"| API
+    CA <-->|"bytes direct"| R2
+```
+
+### Metadata API endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /files/:path/upload-url` | Validate base version → presigned R2 PUT for `path/v-N+1` |
+| `POST /files/:path/commit` | Atomic version bump; stale base → conflict record |
+| `GET /files/:path/download-url?v=N` | Presigned R2 GET |
+| `GET /files/:path/history` | Versions w/ author, timestamp, size |
+| `POST /files/:path/restore` | Copy version N forward as current |
+| `GET /files?since=T` | Change feed (polling now, websockets later) |
+| `POST /tokens` | Mint scoped, expiring, revocable machine tokens |
+| `POST /forks` | Create branch — metadata-only, constant time |
+
+### Schema
+
+```text
+files(path, branch_id, current_version, updated_at, updated_by, PK(path, branch_id))
+versions(path, branch_id, version, r2_key, size, hash, author, base_version, created_at)
+conflicts(path, version_a, version_b, detected_at, resolved)
+branches(id PK, name, parent_branch, fork_point, created_at)
+auth_tokens(token PK, name, scope, created_by, created_at, expires_at, revoked_at)
+locks(path PK, holder, acquired_at, expires_at)  -- reserved, post-MVP
+```
+
+## 8. Failure modes & honest limits
+
+| Failure | Behavior |
+|---|---|
+| Slow network | Prefetch shrinks; seeks stall; degrades to connection speed |
+| File > write buffer | Clear error (MVP) |
+| Crash mid-write | Pending-write buffer replays; no acknowledged data lost |
+| Offline | Cached blocks readable; rest errors cleanly |
+| Whole-tree scans (`grep -r`) | Defeats prefetch; slow — documented limitation |
+| Mount + network stall | Apps freeze in `read()` — raises bar on timeouts/prefetch |
+
+## 9. Success metrics
+
+- Cold-open cache miss < 1.5× raw download time to first block
+- Cached open indistinguishable from local disk
+- 100% of conflicting versions preserved
+- Footprint ≤ 2GB verified under stress test
+- Mount passes pjdfstest POSIX conformance on all three OSes
+
+## 10. Build order
+
+1. **CLI MVP** — API + R2 + sync engine + cache + CLI (proves the pipeline; agents can use it immediately)
+2. **Mount design doc** — internal interface + write-path semantics frozen before FUSE code (enables parallel agent implementation)
+3. **Mount** — per-OS bindings against frozen interface
+4. **Forks + change feed**
+5. **Tauri frontend**
+6. **Later** — S3 endpoint, notifications, locks, safe merges, multi-user permissions
+
+## 11. Testing strategy
+
+- Devin hosted machines: Ubuntu (primary dev), macOS, Windows — real per-OS mount testing in-session
+- GitHub Actions matrix (`ubuntu`/`windows`/`macos-latest`) for every-push regression; WinFsp/macFUSE installable in CI
+- pjdfstest for POSIX conformance; crash-recovery and slow-network test suites
+- Thin-platform-shim rule keeps ~90% of code testable on Linux
+
+## 12. Key risks
+
+- **Write-path correctness** — the single most bug-prone area (dirty blocks, crash safety, POSIX semantics over immutable objects)
+- **Conflict UX** — detection is easy; good resolution UX is not, and agent collisions make it frequent
+- **OS-generated mount traffic** — indexers/thumbnails/AV can make the mount feel broken without aggressive metadata caching
+- **Space's head start** — mitigation is focus: agent workflow depth + 2GB simplicity guarantee, not feature parity
