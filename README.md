@@ -1,55 +1,39 @@
 # superfs
 building infinite storage for everyone.
 
-**Superfs is a shared filesystem for people and AI agents.** The goal is to let them work with the same project files across devices and sandboxes, without keeping a complete copy everywhere.
+**Superfs is the filesystem humans and coding agents share.** People and AI agents work on the same project files across laptops, CI, and sandboxes, without keeping a full copy everywhere.
 
-## What it does
+## Docs
 
-- Fetches files when they’re needed and caches frequently used files locally.
-- Syncs changes so other devices and agents can see them.
-- Keeps file history so a previous version can be restored.
-- Detects overlapping edits and preserves conflicts for review.
+- [Product requirements](docs/prd.md): vision, surfaces, user stories, success metrics, roadmap
+- [Architecture](docs/architecture.md): topology, R2 layout, metadata API, DB schema, forks, conflicts, cache, write path, auth, failure modes
+- [Mount design (stub)](docs/mount-design.md): FUSE ↔ core contract, write-path semantics, crash consistency, module breakdown
 
-Those are the product goals described in our earlier discussion; the site doesn’t publish enough technical detail to confirm how they’re implemented.
+## Three surfaces, one drive
 
-## How it could work
+| Surface | For | Phase |
+|---|---|---|
+| **Mount** (FUSE / macFUSE / WinFsp) | People and tools that expect a normal folder | 2 |
+| **CLI / HTTP API** | Coding agents, scripts, CI | 1 |
+| **S3-compatible endpoint** | Existing programs and S3 SDKs | 4 |
 
-1. **A client on each machine** presents the project as a normal folder.
-2. When a program reads a file, the client checks its local cache. If the file isn’t there, it fetches it from cloud storage.
-3. When a file changes, the client uploads a new version and updates shared metadata.
-4. Other clients learn that the file changed, then fetch the new version when needed.
-5. If two clients edit from the same old version, Superfs keeps both changes. Safe edits, like changes to separate JSON keys, could be merged; overlapping edits should be flagged for review.
+## Key decisions
 
-## Where Cloudflare R2 fits
+- **Agents are first-class users.**
+  - **Scoped, revocable tokens:** limited to path prefixes, permissions, a branch, and an expiry. Folder sharing is a scoped token.
+  - **Per-version author attribution:** every version records which human or agent wrote it.
+  - **Constant-time forks:** metadata-only, copy-on-write. Each agent task gets its own isolated drive.
+  - **Change feed:** `files?since=T` lets agents react to edits instead of polling.
+- **Nothing is silently overwritten.** Each version is an immutable R2 object (`path/v-N`). Commits are compare-and-swap. On a human-vs-agent conflict both versions are kept for review.
+- **Disk cache is on by default.** Files are fetched lazily in 1 MiB blocks and cached in RAM and on disk.
+- **Fixed 2 GB maximum client footprint.** About 1.7 GB read cache, 250 MB pending writes, and 50 MB metadata, under a hard cap. Pending writes are never evicted. Writers get backpressure instead.
+- **No user-facing tuning.** There are no cache size knobs or sync settings to configure.
+- **R2 holds bytes. The metadata service holds truth.** Clients transfer data directly with short-lived presigned URLs.
 
-R2 looks like a reasonable place to store the **file contents and version snapshots**. It supports the S3 API, so standard S3 tools and libraries can connect to it. [Cloudflare R2 S3 docs](https://developers.cloudflare.com/r2/get-started/s3/)
+## Roadmap
 
-R2 should **not be the whole sync system**. It stores objects, but Superfs also needs a metadata and coordination layer to track each file’s current version, who changed it, and whether an upload was based on stale data.
-
-A possible layout:
-
-```text
-Laptop / agent sandbox
-  └─ Superfs client + local cache
-       ├─ reads and writes files
-       └─ syncs with Superfs API
-            ├─ metadata database: paths, versions, permissions, conflicts
-            └─ Cloudflare R2: file contents and snapshots
-```
-
-For uploads and downloads, the API could authorize a specific operation with a short-lived presigned URL, letting the client transfer the file directly to or from R2. [Cloudflare presigned URL docs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
-
-## Important concurrency detail
-
-R2 is strongly consistent for object reads and writes, but if two clients write to the **same object key**, the last completed write wins. That alone won’t protect simultaneous edits. [Cloudflare R2 consistency docs](https://developers.cloudflare.com/r2/reference/consistency/)
-
-So Superfs should give every file version an immutable key, such as `project/file.json/version-42`, and use its metadata service to decide which version is current. If a client tries to publish based on an outdated version, the service can preserve both versions and report a conflict instead of silently overwriting one.
-
-## When to build what
-
-- **First:** R2 storage, file versions, metadata records, and basic upload/download.
-- **Next:** local cache and a client that exposes files as a folder.
-- **Then:** change notifications, offline behavior, permissions, and conflict handling.
-- **Later:** agent integrations, automatic safe merges, and richer history tools.
-
-**Short version:** R2 can hold the bytes. Superfs still needs a client, cache, metadata service, and version-aware conflict logic to make it feel like one shared drive.
+1. **CLI:** metadata API, R2 versioned storage, scoped tokens, attribution, history/restore
+2. **Mount:** portable core + OS shims, two-tier cache, offline writes, conflict handling
+3. **Forks:** constant-time forks, diff/merge, change feed
+   - **3b. Tauri app:** desktop UI for sign-in, sync status, conflicts, tokens
+4. **Platform:** S3-compatible endpoint, notifications, advisory locks
