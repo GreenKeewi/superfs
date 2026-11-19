@@ -5,7 +5,7 @@ building infinite storage for everyone.
 
 ## Docs
 
-- [Product requirements](docs/prd.md): vision, surfaces, user stories, success metrics, roadmap
+- [Product requirements](docs/prd.md): vision, goals/non-goals, user stories, functional requirements, failure modes, metrics, build order, testing, risks
 - [Architecture](docs/architecture.md): topology, R2 layout, metadata API, DB schema, forks, conflicts, cache, write path, auth, failure modes
 - [Mount design (stub)](docs/mount-design.md): FUSE ↔ core contract, write-path semantics, crash consistency, module breakdown
 
@@ -25,15 +25,16 @@ building infinite storage for everyone.
   - **Constant-time forks:** metadata-only, copy-on-write. Each agent task gets its own isolated drive.
   - **Change feed:** `files?since=T` lets agents react to edits instead of polling.
 - **Nothing is silently overwritten.** Each version is an immutable R2 object (`path/v-N`). Commits are compare-and-swap. On a human-vs-agent conflict both versions are kept for review.
-- **Disk cache is on by default.** Files are fetched lazily in 1 MiB blocks and cached in RAM and on disk.
+- **Disk cache is on by default.** Files are fetched lazily in 256 KB–1 MiB blocks and cached in RAM and on disk.
 - **Fixed 2 GB maximum client footprint.** About 1.7 GB read cache, 250 MB pending writes, and 50 MB metadata, under a hard cap. Pending writes are never evicted. Writers get backpressure instead.
 - **No user-facing tuning.** There are no cache size knobs or sync settings to configure.
 - **R2 holds bytes. The metadata service holds truth.** Clients transfer data directly with short-lived presigned URLs.
 
-## Roadmap
+## Build order
 
-1. **CLI:** metadata API, R2 versioned storage, scoped tokens, attribution, history/restore
-2. **Mount:** portable core + OS shims, two-tier cache, offline writes, conflict handling
-3. **Forks:** constant-time forks, diff/merge, change feed
-   - **3b. Tauri app:** desktop UI for sign-in, sync status, conflicts, tokens
-4. **Platform:** S3-compatible endpoint, notifications, advisory locks
+1. **CLI MVP:** metadata API, R2 versioned storage, sync engine, cache, CLI. Agents can use it immediately.
+2. **Mount design doc:** internal interface and write-path semantics frozen before FUSE code.
+3. **Mount:** per-OS bindings (FUSE / macFUSE / WinFsp) against the frozen interface.
+4. **Forks + change feed**
+5. **Tauri desktop app**
+6. **Later:** S3-compatible endpoint, notifications, locks, safe merges, multi-user permissions

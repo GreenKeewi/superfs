@@ -74,7 +74,7 @@ Most filesystem calls are metadata calls from the OS and tools, not reads by the
 - **Directory listings** are cached per `(branch, dir)` and refreshed from the feed. `readdir` never goes to the network for a dir seen within the session, unless the feed invalidated it.
 - **OS junk stays local:** `.DS_Store`, `._*`, `.Spotlight-V100`, `.Trashes`, `Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`. These are stored only in a local overlay and never uploaded.
 - **Indexers:** set `.metadata_never_index` (macOS) and the not-content-indexed attribute (Windows) at the mount root, so Spotlight/Windows Search don't pull the whole drive into the cache.
-- **Thumbnail / preview reads** that only touch the first bytes are served block by block (1 MiB) and do not fetch whole files.
+- **Thumbnail / preview reads** that only touch the first bytes are served block by block and do not fetch whole files.
 - All of this lives inside the ~50 MB metadata budget.
 
 ## 5. Module decomposition (parallel implementation)

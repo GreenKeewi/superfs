@@ -233,7 +233,7 @@ Rules:
 
 - **Nothing is ever lost.** The losing write is still a committed version, with its author, reachable from `history` and `conflicts`.
 - **First committer wins head**, whether human or agent. The other side gets a 409.
-- **Human vs agent:** a human's edit is never auto-discarded in favor of an agent's. If an agent loses, it gets a 409 and should rebase or report back. If a human loses to an agent, the mount writes a visible conflict copy (`name (conflict from agent:<label>).ext`) and the Tauri app shows a resolution prompt. The recommended workflow is that agents work on forks, so conflicts only appear at merge time, where a human reviews them.
+- **Human vs agent:** a human's edit is never auto-discarded in favor of an agent's. If an agent loses, it gets a 409 and should rebase or report back. If a human loses to an agent, the mount materializes the losing version as a visible conflict copy (`file.conflict-v<N>.ext`) and the Tauri app shows a resolution prompt. The recommended workflow is that agents work on forks, so conflicts only appear at merge time, where a human reviews them.
 - **Safe auto-merge** (e.g. non-overlapping text hunks, disjoint JSON keys) is a later, opt-in resolution strategy. It never runs implicitly in v1.
 
 ## 7. Client cache
@@ -246,7 +246,8 @@ Rules:
 | Disk block cache | Committed file blocks | `(path, version, block_index)` | LRU |
 | Metadata cache (disk + RAM) | Attrs, dir listings, head versions, negative lookups | `(branch, path)` | LRU + invalidated by change feed |
 
-- Block size is **1 MiB**. Small files are a single (short) block.
+- Block size is **256 KB–1 MiB** (default 1 MiB). Small files are a single (short) block.
+- Reads go RAM → disk → HTTP Range fetch from R2, and fetched blocks are stored in both tiers. A sequential prefetcher reads ahead 1–10 blocks, adapting to measured throughput.
 - Keys include `version`, so a cached block is **never stale**: a new version has a new key. Invalidation only touches the metadata cache (which version is head). Old blocks age out through LRU.
 - Blocks are written to disk with a checksum. A corrupt block is dropped and re-fetched.
 
@@ -259,9 +260,10 @@ Rules:
 | Metadata cache | ~50 MB | SQLite + in-memory index |
 | **Hard cap** | **2 GB** | Enforced by a single budget accountant. Space is reserved before allocation. |
 
-- The disk cache is **on by default**. There is no config flag or env var to change these numbers.
+- The disk cache is **on by default**. No user-visible setting changes these numbers. The only exception is a hidden config flag for pure-streaming mode (no disk cache).
 - If the volume has less free space than the budget, the client shrinks the read cache to fit. It never grows past 2 GB.
 - The pending-write buffer can borrow from the read cache by evicting clean blocks. It can never take space from the metadata budget.
+- A single file larger than the pending-write buffer fails with a clear error in the MVP. Streaming upload comes later.
 
 ## 8. Write path
 
@@ -339,6 +341,7 @@ So readers always see their own writes immediately. Unmodified blocks of a large
 | Lost commit response | Retry returns original result | Idempotent. | None. |
 | Presigned URL expired mid-upload | 403 from R2 | Request new URL for the same `upload_id`. | None. |
 | Pending-write buffer full | Budget accountant | Writers block (backpressure). Clean read blocks are evicted first. | Writes slow down. Nothing is dropped. |
+| File larger than pending-write buffer | Size check before sealing | Clear error to the writer (MVP). Streaming upload later. | Visible error. Nothing is lost. |
 | Disk full on host | `ENOSPC` from local FS | Shrink read cache. If still full, return `ENOSPC` to the writer. | Visible error. Committed data is safe. |
 | Stale-version write (concurrent edit) | CAS 409 | Conflict recorded. Both versions kept. | Conflict copy and prompt. |
 | Token revoked or expired mid-session | 401 / 403 | Stop syncing. Keep pending writes locally. Prompt to re-auth. | Writes stay local until re-auth. |
